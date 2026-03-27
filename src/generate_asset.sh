@@ -26,14 +26,36 @@
 #
 # Usage:
 #   ./src/generate_asset.sh sprite "a pixel-art campfire"
+#   ./src/generate_asset.sh sprite --preset tile "a pixel-art campfire"
 #   ./src/generate_asset.sh sfx    "crackling campfire ambience"
 #   ./src/generate_asset.sh music  "peaceful acoustic guitar"
 #
-# Usage (JSON spec file):
+# Usage (single JSON spec file):
 #   ./src/generate_asset.sh spec.json
 #
-#   spec.json format:
-#   { "type": "sprite|sfx|music", "prompt": "description text" }
+#   spec.json format (single):
+#   { "type": "sprite|sfx|music", "prompt": "description text", "preset": "tile" }
+#
+# Usage (batch JSON spec file):
+#   ./src/generate_asset.sh batch.json
+#
+#   batch.json format (array):
+#   [
+#     { "type": "sprite", "prompt": "pixel-art campfire", "preset": "tile" },
+#     { "type": "sfx",    "prompt": "crackling fire" },
+#     { "type": "music",  "prompt": "calm forest ambience" }
+#   ]
+#
+# Sprite presets (--preset / spec "preset" field):
+#   icon     — 16x16   (app icon, inventory item)
+#   tile     — 32x32   (tilemap cell)
+#   sprite   — 64x64   (character / object)
+#   portrait — 128x128 (NPC portrait, card art)
+#   hd       — 256x256 (default, high-detail asset)
+#
+# Manifest:
+#   Every successfully generated asset is appended to
+#   $ASSET_OUTPUT_DIR/manifest.json for pipeline traceability.
 #
 # Environment variables (or .env file in the directory this script is called from):
 #   OPENAI_API_KEY           — cloud sprite generation (DALL-E 3); tried first
@@ -79,6 +101,7 @@ LOCAL_SPRITE_DEFAULT_URL="http://localhost:7860/sdapi/v1/txt2img"
 LOCAL_SFX_DEFAULT_URL="http://localhost:8080/generate/sfx"
 LOCAL_MUSIC_DEFAULT_URL="http://localhost:8080/generate/music"
 
+# Default local sprite resolution (used when no --preset is given)
 LOCAL_SPRITE_RESOLUTION=256
 LOCAL_SPRITE_STEPS=20
 LOCAL_SPRITE_CFG_SCALE=7.0
@@ -89,6 +112,13 @@ MUSIC_POLL_MAX_ATTEMPTS=20
 SPIN_UP_TIMEOUT=30
 SPIN_UP_POLL=1
 
+# Cloud retry: up to 3 attempts with exponential back-off (2 s, 4 s)
+CLOUD_RETRY_MAX=3
+CLOUD_RETRY_BASE_DELAY=2
+
+# Sprite preset (set by --preset flag or spec file "preset" field)
+SPRITE_PRESET=""
+
 # Load .env from current working directory if it exists
 if [[ -f "$PWD/.env" ]]; then
   set -a
@@ -96,6 +126,8 @@ if [[ -f "$PWD/.env" ]]; then
   source "$PWD/.env"
   set +a
 fi
+
+# ---- Helpers ----
 
 slugify() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//' | cut -c1-32
@@ -152,6 +184,50 @@ ensure_local_server() {
   spin_up_server "$start_cmd_var" "$url"
 }
 
+# Retry a cloud function up to CLOUD_RETRY_MAX times with exponential back-off.
+# Skips immediately (returns 1) when the required API-key env var is unset.
+# $1 = function name   $2 = prompt   $3 = env-var name holding the API key
+_try_with_retry() {
+  local fn="$1" prompt="$2" key_var="$3"
+  [[ -z "${!key_var:-}" ]] && return 1
+
+  local attempt=1 delay="$CLOUD_RETRY_BASE_DELAY"
+  while (( attempt <= CLOUD_RETRY_MAX )); do
+    if "$fn" "$prompt"; then
+      return 0
+    fi
+    if (( attempt < CLOUD_RETRY_MAX )); then
+      echo "Cloud attempt $attempt/$CLOUD_RETRY_MAX failed — retrying in ${delay}s..." >&2
+      sleep "$delay"
+      delay=$(( delay * 2 ))
+    fi
+    (( attempt++ ))
+  done
+  return 1
+}
+
+# Resolve width/height for local sprite generation based on SPRITE_PRESET.
+_preset_dimensions() {
+  case "${SPRITE_PRESET:-hd}" in
+    icon)     echo "16 16" ;;
+    tile)     echo "32 32" ;;
+    sprite)   echo "64 64" ;;
+    portrait) echo "128 128" ;;
+    hd)       echo "$LOCAL_SPRITE_RESOLUTION $LOCAL_SPRITE_RESOLUTION" ;;
+    *)        die "Unknown preset '${SPRITE_PRESET}' — use: icon, tile, sprite, portrait, hd" ;;
+  esac
+}
+
+# Append entry to manifest.json via manifest.py (silently skipped if unavailable).
+_record_manifest() {
+  local type="$1" prompt="$2" backend="$3" filename="$4"
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if command -v python3 &>/dev/null && [[ -f "$script_dir/manifest.py" ]]; then
+    python3 "$script_dir/manifest.py" "$OUTPUT_DIR" "$type" "$prompt" "$backend" "$filename" 2>/dev/null || true
+  fi
+}
+
 mkdir -p "$OUTPUT_DIR"
 
 # ---- Sprite ----
@@ -161,8 +237,8 @@ generate_sprite() {
   local local_url="${LOCAL_SPRITE_URL:-$LOCAL_SPRITE_DEFAULT_URL}"
 
   if [[ -z "${FORCE_LOCAL_AI:-}" ]]; then
-    _try_generate_sprite_cloud "$prompt" && return 0
-    _try_generate_sprite_hf "$prompt" && return 0
+    _try_with_retry _try_generate_sprite_cloud "$prompt" OPENAI_API_KEY && return 0
+    _try_with_retry _try_generate_sprite_hf "$prompt" HUGGING_FACE && return 0
   fi
 
   echo "Falling back to local sprite server..."
@@ -213,6 +289,7 @@ _try_generate_sprite_cloud() {
 
   mv "$tmp_file" "$OUTPUT_DIR/$filename"
   echo "Saved: $OUTPUT_DIR/$filename"
+  _record_manifest sprite "$prompt" openai "$filename"
   return 0
 }
 
@@ -240,20 +317,25 @@ _try_generate_sprite_hf() {
   filename="$(build_filename sprite "$prompt" jpg)"
   mv "$tmp_file" "$OUTPUT_DIR/$filename"
   echo "Saved: $OUTPUT_DIR/$filename"
+  _record_manifest sprite "$prompt" huggingface "$filename"
   return 0
 }
 
 _generate_sprite_local() {
   local prompt="$1" url="$2"
+  local dims w h
+  dims="$(_preset_dimensions)"
+  w="$(echo "$dims" | cut -d' ' -f1)"
+  h="$(echo "$dims" | cut -d' ' -f2)"
 
-  echo "Generating sprite (local — $url): $prompt"
+  echo "Generating sprite (local — $url, ${w}x${h}): $prompt"
   local response
   response="$(curl -sS -X POST "$url" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \
       --arg p "$prompt" \
-      --argjson w "$LOCAL_SPRITE_RESOLUTION" \
-      --argjson h "$LOCAL_SPRITE_RESOLUTION" \
+      --argjson w "$w" \
+      --argjson h "$h" \
       --argjson steps "$LOCAL_SPRITE_STEPS" \
       --argjson cfg "$LOCAL_SPRITE_CFG_SCALE" \
       '{prompt: $p, width: $w, height: $h, steps: $steps, cfg_scale: $cfg}')")"
@@ -266,6 +348,7 @@ _generate_sprite_local() {
   filename="$(build_filename sprite "$prompt" png)"
   echo "$b64" | base64 -d > "$OUTPUT_DIR/$filename"
   echo "Saved: $OUTPUT_DIR/$filename"
+  _record_manifest sprite "$prompt" local "$filename"
 }
 
 # ---- SFX ----
@@ -274,7 +357,7 @@ generate_sfx() {
   local prompt="$1"
   local local_url="${LOCAL_SFX_URL:-$LOCAL_SFX_DEFAULT_URL}"
 
-  if [[ -z "${FORCE_LOCAL_AI:-}" ]] && _try_generate_sfx_cloud "$prompt"; then
+  if [[ -z "${FORCE_LOCAL_AI:-}" ]] && _try_with_retry _try_generate_sfx_cloud "$prompt" ELEVENLABS_API_KEY; then
     return 0
   fi
 
@@ -307,6 +390,7 @@ _try_generate_sfx_cloud() {
   filename="$(build_filename sfx "$prompt" mp3)"
   mv "$tmp_file" "$OUTPUT_DIR/$filename"
   echo "Saved: $OUTPUT_DIR/$filename"
+  _record_manifest sfx "$prompt" elevenlabs "$filename"
   return 0
 }
 
@@ -331,6 +415,7 @@ _generate_sfx_local() {
   filename="$(build_filename sfx "$prompt" wav)"
   mv "$tmp_file" "$OUTPUT_DIR/$filename"
   echo "Saved: $OUTPUT_DIR/$filename"
+  _record_manifest sfx "$prompt" local "$filename"
 }
 
 # ---- Music ----
@@ -339,7 +424,7 @@ generate_music() {
   local prompt="$1"
   local local_url="${LOCAL_MUSIC_URL:-$LOCAL_MUSIC_DEFAULT_URL}"
 
-  if [[ -z "${FORCE_LOCAL_AI:-}" ]] && _try_generate_music_cloud "$prompt"; then
+  if [[ -z "${FORCE_LOCAL_AI:-}" ]] && _try_with_retry _try_generate_music_cloud "$prompt" REPLICATE_API_TOKEN; then
     return 0
   fi
 
@@ -414,6 +499,7 @@ _try_generate_music_cloud() {
 
   mv "$tmp_file" "$OUTPUT_DIR/$filename"
   echo "Saved: $OUTPUT_DIR/$filename"
+  _record_manifest music "$prompt" replicate "$filename"
   return 0
 }
 
@@ -438,43 +524,83 @@ _generate_music_local() {
   filename="$(build_filename music "$prompt" wav)"
   mv "$tmp_file" "$OUTPUT_DIR/$filename"
   echo "Saved: $OUTPUT_DIR/$filename"
+  _record_manifest music "$prompt" local "$filename"
 }
 
 # ---- Main ----
 
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <sprite|sfx|music> \"prompt text\""
+_usage() {
+  echo "Usage: $0 [--preset icon|tile|sprite|portrait|hd] <sprite|sfx|music> \"prompt\""
   echo "       $0 spec.json"
+  echo "       $0 batch.json   (array of {type, prompt, preset?})"
+}
+
+if [[ $# -lt 1 ]]; then
+  _usage
   exit 1
 fi
 
+# Parse optional --preset flag
+if [[ "${1:-}" == "--preset" ]]; then
+  [[ $# -lt 2 ]] && die "--preset requires a value"
+  SPRITE_PRESET="$2"
+  shift 2
+fi
+
+# Spec / batch file
 if [[ $# -eq 1 && "$1" == *.json ]]; then
   spec_file="$1"
   [[ ! -f "$spec_file" ]] && die "Spec file not found: $spec_file"
 
+  # Batch mode: spec file is a JSON array
+  if jq -e 'type == "array"' "$spec_file" >/dev/null 2>&1; then
+    count="$(jq 'length' "$spec_file")"
+    (( count == 0 )) && die "Batch spec file is empty"
+    echo "Batch: $count asset(s) to generate"
+    for i in $(seq 0 $(( count - 1 ))); do
+      asset_type="$(jq -r ".[$i].type // empty" "$spec_file")"
+      asset_prompt="$(jq -r ".[$i].prompt // empty" "$spec_file")"
+      asset_preset="$(jq -r ".[$i].preset // empty" "$spec_file")"
+      [[ -z "$asset_type" ]]   && die "Batch item $i missing \"type\" field"
+      [[ -z "$asset_prompt" ]] && die "Batch item $i missing \"prompt\" field"
+      SPRITE_PRESET="${asset_preset:-${SPRITE_PRESET:-}}"
+      echo "--- [$((i+1))/$count] $asset_type: $asset_prompt ---"
+      case "$asset_type" in
+        sprite) generate_sprite "$asset_prompt" ;;
+        sfx)    generate_sfx    "$asset_prompt" ;;
+        music)  generate_music  "$asset_prompt" ;;
+        *)      die "Unknown asset type in batch item $i: $asset_type" ;;
+      esac
+      SPRITE_PRESET=""
+    done
+    exit 0
+  fi
+
+  # Single-item spec (existing behaviour)
   asset_type="$(jq -r '.type // empty' "$spec_file")"
   asset_prompt="$(jq -r '.prompt // empty' "$spec_file")"
-  [[ -z "$asset_type" ]] && die "Spec file missing \"type\" field"
+  asset_preset="$(jq -r '.preset // empty' "$spec_file")"
+  [[ -z "$asset_type" ]]   && die "Spec file missing \"type\" field"
   [[ -z "$asset_prompt" ]] && die "Spec file missing \"prompt\" field"
+  [[ -n "$asset_preset" ]] && SPRITE_PRESET="$asset_preset"
 
   case "$asset_type" in
     sprite) generate_sprite "$asset_prompt" ;;
-    sfx)    generate_sfx "$asset_prompt" ;;
-    music)  generate_music "$asset_prompt" ;;
+    sfx)    generate_sfx    "$asset_prompt" ;;
+    music)  generate_music  "$asset_prompt" ;;
     *)      die "Unknown asset type in spec: $asset_type (use sprite, sfx, or music)" ;;
   esac
   exit 0
 fi
 
 if [[ $# -lt 2 ]]; then
-  echo "Usage: $0 <sprite|sfx|music> \"prompt text\""
-  echo "       $0 spec.json"
+  _usage
   exit 1
 fi
 
 case "$1" in
   sprite) generate_sprite "$2" ;;
-  sfx)    generate_sfx "$2" ;;
-  music)  generate_music "$2" ;;
+  sfx)    generate_sfx    "$2" ;;
+  music)  generate_music  "$2" ;;
   *)      die "Unknown asset type: $1 (use sprite, sfx, or music)" ;;
 esac
