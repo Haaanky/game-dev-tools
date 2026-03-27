@@ -19,10 +19,9 @@ import http.server
 import importlib
 import io
 import json
-import os
 import subprocess
 import sys
-from typing import Optional
+import threading
 
 HOST = "127.0.0.1"
 PORT = 7860
@@ -65,28 +64,30 @@ def _ensure_packages() -> None:
 
 # Pipeline is loaded lazily on first request
 _pipeline = None
+_pipeline_lock = threading.Lock()
 
 
-def _load_pipeline():
+def _load_pipeline() -> object:
     global _pipeline
-    if _pipeline is not None:
+    with _pipeline_lock:
+        if _pipeline is not None:
+            return _pipeline
+
+        import torch
+        from diffusers import StableDiffusionPipeline
+
+        print(f"[sprite] Loading model {MODEL_ID} (CPU) — may take a few minutes...", flush=True)
+        pipe = StableDiffusionPipeline.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float32,
+            safety_checker=None,
+            requires_safety_checker=False,
+        )
+        pipe = pipe.to("cpu")
+        pipe.enable_attention_slicing()
+        _pipeline = pipe
+        print("[sprite] Model ready.", flush=True)
         return _pipeline
-
-    import torch
-    from diffusers import StableDiffusionPipeline
-
-    print(f"[sprite] Loading model {MODEL_ID} (CPU) — may take a few minutes...", flush=True)
-    pipe = StableDiffusionPipeline.from_pretrained(
-        MODEL_ID,
-        torch_dtype=torch.float32,
-        safety_checker=None,
-        requires_safety_checker=False,
-    )
-    pipe = pipe.to("cpu")
-    pipe.enable_attention_slicing()
-    _pipeline = pipe
-    print("[sprite] Model ready.", flush=True)
-    return _pipeline
 
 
 def _generate(prompt: str, width: int, height: int, steps: int, cfg_scale: float) -> str:
@@ -123,11 +124,11 @@ class SpriteHandler(http.server.BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             body = {}
 
-        prompt: str = body.get("prompt", "pixel art sprite")
-        width: int = int(body.get("width", 256))
-        height: int = int(body.get("height", 256))
-        steps: int = int(body.get("steps", 10))
-        cfg_scale: float = float(body.get("cfg_scale", 7.0))
+        prompt: str = str(body.get("prompt", "pixel art sprite"))[:500]
+        width: int = max(64, min(int(body.get("width", 256)), 1024))
+        height: int = max(64, min(int(body.get("height", 256)), 1024))
+        steps: int = max(1, min(int(body.get("steps", 10)), 150))
+        cfg_scale: float = max(1.0, min(float(body.get("cfg_scale", 7.0)), 30.0))
 
         print(f"[sprite] Generating: {prompt!r} ({width}x{height}, {steps} steps)", flush=True)
         try:
