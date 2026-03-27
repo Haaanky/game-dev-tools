@@ -51,6 +51,22 @@
 
 set -euo pipefail
 
+# Cleanup temp files on exit
+_TMPFILES=()
+_cleanup() {
+  for f in "${_TMPFILES[@]+"${_TMPFILES[@]}"}"; do
+    rm -f "$f"
+  done
+}
+trap _cleanup EXIT
+
+_mktemp() {
+  local f
+  f="$(mktemp)"
+  _TMPFILES+=("$f")
+  echo "$f"
+}
+
 # Output directory: env var override, else current working directory / assets/generated
 OUTPUT_DIR="${ASSET_OUTPUT_DIR:-$PWD/assets/generated}"
 
@@ -71,7 +87,7 @@ MUSIC_POLL_INTERVAL=3
 MUSIC_POLL_MAX_ATTEMPTS=20
 
 SPIN_UP_TIMEOUT=30
-SPIN_UP_POLL=0.5
+SPIN_UP_POLL=1
 
 # Load .env from current working directory if it exists
 if [[ -f "$PWD/.env" ]]; then
@@ -115,10 +131,10 @@ spin_up_server() {
   fi
   echo "Starting local server: $start_cmd"
   eval "$start_cmd" &
-  local elapsed=0
-  while (( $(echo "$elapsed < $SPIN_UP_TIMEOUT" | bc -l) )); do
+  local attempts=0
+  while (( attempts < SPIN_UP_TIMEOUT )); do
     sleep "$SPIN_UP_POLL"
-    elapsed=$(echo "$elapsed + $SPIN_UP_POLL" | bc -l)
+    (( attempts += SPIN_UP_POLL ))
     if probe_local "$probe_url"; then
       echo "Local server ready."
       return 0
@@ -187,11 +203,10 @@ _try_generate_sprite_cloud() {
 
   local filename tmp_file dl_code
   filename="$(build_filename sprite "$prompt" png)"
-  tmp_file="$(mktemp)"
+  tmp_file="$(_mktemp)"
   dl_code="$(curl -sS -o "$tmp_file" -w "%{http_code}" "$image_url")"
 
   if [[ "$dl_code" -lt 200 || "$dl_code" -ge 300 ]]; then
-    rm -f "$tmp_file"
     echo "Cloud sprite download failed (HTTP $dl_code) — will try local." >&2
     return 1
   fi
@@ -207,7 +222,7 @@ _try_generate_sprite_hf() {
 
   echo "Generating sprite (cloud — HuggingFace FLUX.1-schnell): $prompt"
   local tmp_file http_code
-  tmp_file="$(mktemp)"
+  tmp_file="$(_mktemp)"
   http_code="$(curl -sS -X POST "$HF_SPRITE_API_URL" \
     -H "Authorization: Bearer $HUGGING_FACE" \
     -H "Content-Type: application/json" \
@@ -216,7 +231,7 @@ _try_generate_sprite_hf() {
     -w "%{http_code}")"
 
   if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-    local err; err="$(head -c 200 "$tmp_file")"; rm -f "$tmp_file"
+    local err; err="$(head -c 200 "$tmp_file")"
     echo "Cloud sprite (HF) failed (HTTP $http_code: $err) — will try local." >&2
     return 1
   fi
@@ -274,7 +289,7 @@ _try_generate_sfx_cloud() {
 
   echo "Generating SFX (cloud — ElevenLabs): $prompt"
   local tmp_file http_code
-  tmp_file="$(mktemp)"
+  tmp_file="$(_mktemp)"
   http_code="$(curl -sS -X POST "$SFX_API_URL" \
     -H "Content-Type: application/json" \
     -H "xi-api-key: $ELEVENLABS_API_KEY" \
@@ -283,7 +298,7 @@ _try_generate_sfx_cloud() {
     -w "%{http_code}")"
 
   if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-    local err; err="$(cat "$tmp_file")"; rm -f "$tmp_file"
+    local err; err="$(cat "$tmp_file")"
     echo "Cloud SFX failed (HTTP $http_code: $err) — will try local." >&2
     return 1
   fi
@@ -300,7 +315,7 @@ _generate_sfx_local() {
 
   echo "Generating SFX (local — $url): $prompt"
   local tmp_file http_code
-  tmp_file="$(mktemp)"
+  tmp_file="$(_mktemp)"
   http_code="$(curl -sS -X POST "$url" \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg t "$prompt" '{text: $t, duration: 5}')" \
@@ -308,7 +323,7 @@ _generate_sfx_local() {
     -w "%{http_code}")"
 
   if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-    local err; err="$(cat "$tmp_file")"; rm -f "$tmp_file"
+    local err; err="$(cat "$tmp_file")"
     die "Local SFX server returned HTTP $http_code — $err"
   fi
 
@@ -389,11 +404,10 @@ _try_generate_music_cloud() {
 
   local filename tmp_file dl_code
   filename="$(build_filename music "$prompt" mp3)"
-  tmp_file="$(mktemp)"
+  tmp_file="$(_mktemp)"
   dl_code="$(curl -sS -o "$tmp_file" -w "%{http_code}" "$audio_url")"
 
   if [[ "$dl_code" -lt 200 || "$dl_code" -ge 300 ]]; then
-    rm -f "$tmp_file"
     echo "Cloud music download failed (HTTP $dl_code) — will try local." >&2
     return 1
   fi
@@ -408,7 +422,7 @@ _generate_music_local() {
 
   echo "Generating music (local — $url): $prompt"
   local tmp_file http_code
-  tmp_file="$(mktemp)"
+  tmp_file="$(_mktemp)"
   http_code="$(curl -sS -X POST "$url" \
     -H "Content-Type: application/json" \
     -d "$(jq -n --arg t "$prompt" '{text: $t, duration: 30}')" \
@@ -416,7 +430,7 @@ _generate_music_local() {
     -w "%{http_code}")"
 
   if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-    local err; err="$(cat "$tmp_file")"; rm -f "$tmp_file"
+    local err; err="$(cat "$tmp_file")"
     die "Local music server returned HTTP $http_code — $err"
   fi
 

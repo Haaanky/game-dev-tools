@@ -1,0 +1,11 @@
+# Sprite server dependencies
+torch
+torchvision
+diffusers
+transformers
+accelerate
+safetensors
+
+# Audio server dependencies
+audiocraft
+numpy

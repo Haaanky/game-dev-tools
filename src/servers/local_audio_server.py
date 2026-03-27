@@ -19,6 +19,7 @@ import io
 import json
 import subprocess
 import sys
+import threading
 import wave
 
 HOST = "127.0.0.1"
@@ -61,18 +62,20 @@ def _ensure_packages() -> None:
 
 
 _model = None
+_model_lock = threading.Lock()
 
 
-def _load_model():
+def _load_model() -> object:
     global _model
-    if _model is not None:
+    with _model_lock:
+        if _model is not None:
+            return _model
+        from audiocraft.models import MusicGen
+        print("[audio] Loading facebook/musicgen-small (CPU) — first use may take a few minutes...", flush=True)
+        model = MusicGen.get_pretrained("facebook/musicgen-small")
+        _model = model
+        print("[audio] Model ready.", flush=True)
         return _model
-    from audiocraft.models import MusicGen
-    print("[audio] Loading facebook/musicgen-small (CPU) — first use may take a few minutes...", flush=True)
-    model = MusicGen.get_pretrained("facebook/musicgen-small")
-    _model = model
-    print("[audio] Model ready.", flush=True)
-    return _model
 
 
 def _generate_audio(text: str, duration: float) -> bytes:
@@ -115,10 +118,10 @@ class AudioHandler(http.server.BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             body = {}
 
-        text: str = body.get("text", "ambient sound")
+        text: str = str(body.get("text", "ambient sound"))[:500]
         is_music = "/music" in self.path
         default_dur = DEFAULT_MUSIC_DURATION if is_music else DEFAULT_SFX_DURATION
-        duration: float = float(body.get("duration", default_dur))
+        duration: float = max(0.5, min(float(body.get("duration", default_dur)), MAX_DURATION))
 
         asset_type = "music" if is_music else "sfx"
         print(f"[audio] Generating {asset_type}: {text!r} ({duration}s)", flush=True)
