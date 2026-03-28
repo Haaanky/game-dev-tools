@@ -39,10 +39,10 @@ from urllib.request import Request, urlopen
 _OAUTH_CODE_URL = (
     "https://ca.account.sony.com/api/v1/oauth/code"
     "?access_type=offline"
-    "&client_id=ac8d161a-d966-4728-b0ea-ffec22f69edc"
-    "&redirect_uri=com.playstation.PlayStationApp%3A%2F%2Fredirect"
+    "&client_id=09515159-7237-4370-9b40-3806e67c0891"
+    "&redirect_uri=com.scee.psxandroid.scecompcall%3A%2F%2Fredirect"
     "&response_type=code"
-    "&scope=psn%3Amobile.v2.core+psn%3Aclientapp"
+    "&scope=psn%3Amobile.v1.core+psn%3Aclientapp"
 )
 _OAUTH_TOKEN_URL = "https://ca.account.sony.com/api/v1/oauth/token"
 _NPSSO_EXCHANGE_URL = (
@@ -59,9 +59,9 @@ _PROFILE_URL = (
     "https://m.np.playstation.com/api/userProfile/v1/internal/users/{username}/profiles"
 )
 
-_CLIENT_ID = "ac8d161a-d966-4728-b0ea-ffec22f69edc"
-_CLIENT_SECRET = "veTracA1t2AY"  # public / well-known mobile client secret
-_REDIRECT_URI = "com.playstation.PlayStationApp://redirect"
+_CLIENT_ID = "09515159-7237-4370-9b40-3806e67c0891"
+_CLIENT_SECRET = "ucybISyx57th9tup"  # public / well-known mobile client secret
+_REDIRECT_URI = "com.scee.psxandroid.scecompcall://redirect"
 
 
 def _post(url: str, data: dict, headers: dict | None = None) -> dict:

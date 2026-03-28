@@ -1,5 +1,7 @@
 .env
 assets/generated/
+games_*.csv
+games_*.json
 __pycache__/
 *.pyc
 .venv/
